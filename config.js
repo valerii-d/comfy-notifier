@@ -14,8 +14,6 @@ module.exports = {
   
   // Notification settings
   notifications: {
-    // Default timezone for cron jobs
-    timezone: 'UTC',
     // Maximum number of notifications per chat
     maxPerChat: 50
   },

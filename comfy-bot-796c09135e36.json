@@ -1,0 +1,13 @@
+{
+  "type": "service_account",
+  "project_id": "comfy-bot",
+  "private_key_id": "796c09135e368190f25e29298259959ad21ee78c",
+  "private_key": "-----BEGIN PRIVATE KEY-----\nMIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQCYjXFJr3bN9fV8\n4THOQsg2/yWZ/XOw0DAHE9flkXJcG6PgJomGEFd3UGNDp9mUCyIm3EcTJR3Rf0+H\nOd5e35c37e6fdIzTI2lLv+hjArLll7bPMtuzlbNta2/bFaa1c45W85ZAmeNDQS5e\ncMGm8GTicBPrT9JB6RhmLc4l4zhy2sFyvIGibf4f4KhX9UIAvh8+PHHCo0sLqIbC\nPayohfxYnKaO9SsA6BzicP+A5F3T4RALZ+QLCN9eimZ8c7p0BQeI/1wN/Pm8d/EY\nvFTncxGEG4DVLDSv8+EPNhftO+EY1hBUSdSQ6SRLZFdy++i+3pgBAUAN3u/XlX6Y\nQCx9a9nhAgMBAAECggEACyRe3zWO79bEagKTU1qn/5xTGr7a8acYWuv6xixWtfOE\nMfLz8x7DxKsnv4vwOv01LrFtX4XuekavgFOcXOw9FztW776Lf+sDiHd+ead7eYQY\njg72N6pPbfEoPPrahOuTvItosKniDMojS4fgx633MF1klw3qxXWeRULt3kaM8OvR\nuFza5OBCG9tW8aOvKt26IBEzccWJpPj0jfQPnPNSpSFdkoohi0n86EdSpLVgIdzN\nezy5slHOOL89/wch+C+UuWI0ob7EEkNca0WHQNVXImazPjRQqQD95k/wSMIIi19B\nAw/pmIqrRaxYAuSHFutg1NqnKtNoPREI/v3rD8FlgQKBgQDWtDwlpCZw+io6Gza5\n7gTf+YGmBlC2vHgXLDQgkPpB3T1ZjwsUcDEVlc/vxcBBlb4BDvHBFvRYQTjZluIc\nVGeHD0h0bESWBBxjKMl54sV0PMKEb6eiEL2uGbCao347cKv27nWOnDQLMNReY5WQ\n/begapVhosXP9dVB/IUZyO60LQKBgQC15PEjkQICBFVxZNJ0eCYVUGOcXrZfQ3+B\n5kxsO+Yrjdc9rFsb1mi4c+h/5hF0IusLayhuTpkiShf/8I+11afvhglxwqBC3OX2\n+kFyI4X32u5KbobF0pvNTzOPE/4Ke/aqLJb7xSFIuFGhP4ExECxmY7+Da4fq8fD5\nJfxs0lfJBQKBgDfFmdotSc8PLOjrKMwjiCCmL4dxHIZbbtaWJPRQtLFnRwh8n+Qv\nQJDa2ajvNYHT5AdiWmpODCrgxmO/Tf0N79aloaycczSE3NrlPXDr9166acz9NA5l\nSuBuy/Ffhurp2cHLL75b1SkTBhd+xttjDNAe3679GWVr9nmtnuWTzG4BAoGBAI86\nxj9xchlQfE+cSrR339UsxiNd2VHOfts1E7yutiJZwMHJtLyI61FDxDLiYaAH1vnY\n2a9yqNb9bUSWkzNmGKVd8JXp4fSEqXj/uwU7v8RaWwW1Xt7rZtAWq8zgu0xaLPP3\nxLRgmEMBERZeQUb3K1888JN120NAXLZ0GP8/6uxZAoGBAIff4hYEEhK1c8choNPG\nr90cWY+NHN8kG8KHteDiTkj+Me8TmsEh9WTSwsNsMnqD0rkSZ73ZwzisUfI2bqWT\n4ha5BodLtzx+jGj19Yda4pS37hLwtJPs3Vht7VsnqvoxqnKQklzsGDF1iaK2OP+p\nmrQTdVb0tkC65mWQV8r/sOZ2\n-----END PRIVATE KEY-----\n",
+  "client_email": "comfy-bot@comfy-bot.iam.gserviceaccount.com",
+  "client_id": "101193010018776281415",
+  "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+  "token_uri": "https://oauth2.googleapis.com/token",
+  "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+  "client_x509_cert_url": "https://www.googleapis.com/robot/v1/metadata/x509/comfy-bot%40comfy-bot.iam.gserviceaccount.com",
+  "universe_domain": "googleapis.com"
+}

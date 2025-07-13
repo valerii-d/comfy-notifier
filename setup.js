@@ -47,7 +47,25 @@ async function setup() {
     const defaultAdmin = await question('Enter your Telegram user ID (optional, press Enter to skip): ');
     const additionalAdmins = await question('Enter additional admin IDs separated by commas (optional, press Enter to skip): ');
     
+    const userTimezone = await question('Введіть таймзону користувача (за замовчуванням Europe/Kiev): ');
+    const googleKeyFile = await question('Введіть шлях до файлу ключа Google Service Account (за замовчуванням service-account-key.json): ');
+    const googleSpreadsheetId = await question('Введіть ID Google Spreadsheet для збереження даних (опціонально, натисніть Enter для пропуску): ');
+    const commandChatId = await question('Введіть Chat ID для відповідей на команди (опціонально, натисніть Enter для пропуску): ');
+
+    const tzUser = userTimezone && userTimezone.trim() ? userTimezone.trim() : 'Europe/Kiev';
+    const keyFile = googleKeyFile && googleKeyFile.trim() ? googleKeyFile.trim() : 'service-account-key.json';
+
     let envContent = `# Telegram Bot Token (get from @BotFather)\nBOT_TOKEN=${botToken}\n`;
+    envContent += `USER_TIMEZONE=${tzUser}\n`;
+    envContent += `GOOGLE_SERVICE_ACCOUNT_KEY=${keyFile}\n`;
+    
+    if (googleSpreadsheetId && googleSpreadsheetId.trim()) {
+      envContent += `GOOGLE_SPREADSHEET_ID=${googleSpreadsheetId.trim()}\n`;
+    }
+    
+    if (commandChatId && commandChatId.trim()) {
+      envContent += `DEFAULT_COMMAND_CHAT_ID=${commandChatId.trim()}\n`;
+    }
     
     if (defaultAdmin && defaultAdmin !== 'your_telegram_user_id_here') {
       let adminIds = defaultAdmin;

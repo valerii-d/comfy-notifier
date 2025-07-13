@@ -1,6 +1,36 @@
 require('dotenv').config();
 const { Telegraf, Markup } = require('telegraf');
 const cron = require('node-cron');
+const moment = require('moment-timezone');
+const { google } = require('googleapis');
+
+// Timezone configuration
+const USER_TIMEZONE = process.env.USER_TIMEZONE || 'Europe/Kiev'; // User timezone (configurable)
+
+// Get server's current timezone dynamically
+function getServerTimezone() {
+  try {
+    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    if (tz) {
+      console.log(`Server timezone detected: ${tz}`);
+      return tz;
+    }
+    throw new Error('Could not detect timezone');
+  } catch (error) {
+    console.error('Error detecting server timezone:', error);
+    return 'UTC'; // Fallback to UTC
+  }
+}
+
+const SERVER_TIMEZONE = getServerTimezone();
+
+// Google Sheets configuration
+const auth = new google.auth.GoogleAuth({
+  keyFile: process.env.GOOGLE_SERVICE_ACCOUNT_KEY || 'service-account-key.json',
+  scopes: ['https://www.googleapis.com/auth/spreadsheets'],
+});
+
+const sheets = google.sheets({ version: 'v4', auth });
 
 // Bot token from environment variables
 const bot = new Telegraf(process.env.BOT_TOKEN);
@@ -9,10 +39,15 @@ const bot = new Telegraf(process.env.BOT_TOKEN);
 const state = {
   admins: new Set(),
   notifications: [],
-  usersOut: new Map(), // userId -> { timestamp, chatId, messageId }
+  usersOut: new Map(), // userId -> { timestamp, chatId, messageId, username, type: 'out' }
+  usersLunch: new Map(), // userId -> { timestamp, chatId, messageId, username, type: 'lunch' }
   dutyUsers: new Set(),
   defaultNotificationChat: null, // Default chat for notifications
-  defaultNotificationTopic: null // Default topic for notifications
+  defaultNotificationTopic: null, // Default topic for notifications
+  defaultCommandChat: null, // Default chat for command responses
+  defaultCommandTopic: null, // Default topic for command responses
+  userTimeTracking: new Map(), // username -> { totalOutTime: 0, totalLunchTime: 0 }
+  userTimezones: new Map() // userId -> timezone
 };
 
 // Initialize with default admins if provided
@@ -41,7 +76,7 @@ const isGroupTopic = (ctx) => {
 
 // Start command
 bot.start((ctx) => {
-  ctx.reply('Welcome to the Notification Bot! Use /help to see available commands.');
+  ctx.reply('Ласкаво просимо в бот сповіщень! Використовуйте /help, щоб побачити доступні команди.');
 });
 
 // Help command
@@ -50,52 +85,55 @@ bot.help((ctx) => {
   const isAdminUser = isAdmin(ctx);
   
   if (isInGroup) {
-    // In groups, only show user commands
     const helpText = `
-🤖 Bot Commands (Group):
+🤖 Команди бота (група):
 
-📋 Команди користувача:
-/out - Відмітьте, що ви вийшли
-/lunch - Відмітьте, що ви вийшли на обід
-/on_duty - Відмітьте, що ви повернулись
+📋 Користувацькі команди:
+/out - Відмітити себе як "відсутній"
+/lunch - Відмітити себе як "на обіді"
+/on_duty - Відмітити себе як "на місці"
 
-📝 Примітка: Ці команди працюють виключно у групових чатах.
+📝 Ці команди працюють лише у групових топіках.
     `;
     ctx.reply(helpText);
   } else if (isAdminUser) {
-    // In private chat with admin, show all commands
     const helpText = `
-🤖 Bot Commands (Admin):
+🤖 Команди бота (адміністратор):
 
-📋 Команди користувача:
-/out - Відмітьте, що ви вийшли
-/lunch - Відмітьте, що ви вийшли на обід
-/on_duty - Відмітьте, що ви повернулись
+📋 Користувацькі команди:
+/out - Відмітити себе як "відсутній"
+/lunch - Відмітити себе як "на обіді"
+/on_duty - Відмітити себе як "на місці"
+/set_timezone - Встановити персональну таймзону
 
-👑 Команди адміна:
+👑 Адмін-команди:
 /admin_panel - Відкрити панель адміністратора
-/add_notification - Додати нове нагадування
-/delete_notification - Видалити нагадування
-/set_notification_target - Встановити групу/чат для нагадувань
-/notification_target - Перевірити активну групу/чат для нагадувань
-/add_admin - Додати нового адміна
-/delete_admin - Видалити адміна
+/add_notification - Додати нове сповіщення
+/delete_notification - Видалити сповіщення
+/set_notification_target - Встановити ціль для сповіщень (група/топік)
+/set_command_target - Встановити ціль для відповідей на команди
+/notification_target - Перевірити поточну ціль для сповіщень
+/command_target - Перевірити поточну ціль для відповідей на команди
+/add_admin - Додати нового адміністратора
+/delete_admin - Видалити адміністратора
+/clear_notifications - Очистити всі сповіщення
+/reset_notification_target - Скинути ціль для сповіщень
 
-📝 Примітка: Команди користувача дійсні лише в групових чатах
+📝 Користувацькі команди працюють лише у групових топіках.
     `;
     ctx.reply(helpText);
   } else {
-    // In private chat with non-admin, show limited info
     const helpText = `
-🤖 Bot Commands:
+🤖 Команди бота:
 
-📋 Командик користувача:
-/out - Відмітьте, що ви вийшли
-/lunch - Відмітьте, що ви вийшли на обід
-/on_duty - Відмітьте, що ви повернулись
+📋 Користувацькі команди:
+/out - Відмітити себе як "відсутній"
+/lunch - Відмітити себе як "на обіді"
+/on_duty - Відмітити себе як "на місці"
+/set_timezone - Встановити персональну таймзону
 
-📝 Примітка: Команди користувача дійсні лише в групових чатах.
-Звʼяжіться з адміністратором для додаткових функцій.
+📝 Ці команди працюють лише у групових топіках.
+Зверніться до адміністратора для додаткових можливостей.
     `;
     ctx.reply(helpText);
   }
@@ -134,7 +172,31 @@ bot.command('out', (ctx) => {
     username: username
   });
 
-  ctx.reply(`👋 ${username} вийшов. Пінганемо через 15 хвилин, якщо не повернешся.`);
+  // Send response to command target if set, otherwise to current chat
+  const responseChatId = state.defaultCommandChat || ctx.chat.id;
+  const responseTopicId = state.defaultCommandTopic || null;
+  
+  const messageOptions = {};
+  if (responseTopicId) {
+    messageOptions.message_thread_id = responseTopicId;
+  }
+
+  bot.telegram.sendMessage(
+    responseChatId,
+    `👋 ${username} вийшов. Пінганемо через 15 хвилин, якщо не повернешся.`,
+    messageOptions
+  ).catch((error) => {
+    console.error('Error sending message to topic:', error.description);
+    // Fallback: send to general chat without topic
+    const fallbackOptions = {};
+    bot.telegram.sendMessage(
+      responseChatId,
+      `👋 ${username} вийшов. Пінганемо через 15 хвилин, якщо не повернешся.`,
+      fallbackOptions
+    ).catch((fallbackError) => {
+      console.error('Fallback message also failed:', fallbackError.description);
+    });
+  });
   
   // Schedule first ping in 15 minutes
   setTimeout(() => {
@@ -147,8 +209,54 @@ bot.command('lunch', (ctx) => {
     return ctx.reply('Ця команда доступна лише в групових чатах ');
   }
 
+  const userId = ctx.from.id;
   const username = ctx.from.username || ctx.from.first_name;
-  ctx.reply(`🍽️ ${username} is on lunch break.`);
+  
+  // Remove from duty users
+  state.dutyUsers.delete(userId);
+  
+  // Mark as lunch - use notification target if set, otherwise use current chat
+  const targetChatId = state.defaultNotificationChat || ctx.chat.id;
+  const targetTopicId = state.defaultNotificationTopic || null;
+  
+  state.usersLunch.set(userId, {
+    timestamp: Date.now(),
+    chatId: targetChatId,
+    topicId: targetTopicId,
+    messageId: ctx.message.message_id,
+    username: username
+  });
+
+  // Send response to command target if set, otherwise to current chat
+  const responseChatId = state.defaultCommandChat || ctx.chat.id;
+  const responseTopicId = state.defaultCommandTopic || null;
+  
+  const messageOptions = {};
+  if (responseTopicId) {
+    messageOptions.message_thread_id = responseTopicId;
+  }
+
+  bot.telegram.sendMessage(
+    responseChatId,
+    `🍽️ ${username} вийшов на обід. Пінганемо через 30 хвилин, якщо не повернешся.`,
+    messageOptions
+  ).catch((error) => {
+    console.error('Error sending lunch message to topic:', error.description);
+    // Fallback: send to general chat without topic
+    const fallbackOptions = {};
+    bot.telegram.sendMessage(
+      responseChatId,
+      `🍽️ ${username} вийшов на обід. Пінганемо через 30 хвилин, якщо не повернешся.`,
+      fallbackOptions
+    ).catch((fallbackError) => {
+      console.error('Fallback lunch message also failed:', fallbackError.description);
+    });
+  });
+  
+  // Schedule first ping in 30 minutes
+  setTimeout(() => {
+    pingUserIfStillLunch(userId);
+  }, 30 * 60 * 1000);
 });
 
 bot.command('on_duty', (ctx) => {
@@ -159,11 +267,50 @@ bot.command('on_duty', (ctx) => {
   const userId = ctx.from.id;
   const username = ctx.from.username || ctx.from.first_name;
   
-  // Remove from out users and add to duty users
-  state.usersOut.delete(userId);
+  // Check if user was out and calculate time spent
+  const outData = state.usersOut.get(userId);
+  if (outData) {
+    const timeSpent = Date.now() - outData.timestamp;
+    updateUserTimeTracking(username, 'out', timeSpent);
+    state.usersOut.delete(userId);
+  }
+  
+  // Check if user was on lunch and calculate time spent
+  const lunchData = state.usersLunch.get(userId);
+  if (lunchData) {
+    const timeSpent = Date.now() - lunchData.timestamp;
+    updateUserTimeTracking(username, 'lunch', timeSpent);
+    state.usersLunch.delete(userId);
+  }
+  
+  // Add to duty users
   state.dutyUsers.add(userId);
 
-  ctx.reply(`✅ ${username} повернувся!`);
+  // Send response to command target if set, otherwise to current chat
+  const responseChatId = state.defaultCommandChat || ctx.chat.id;
+  const responseTopicId = state.defaultCommandTopic || null;
+  
+  const messageOptions = {};
+  if (responseTopicId) {
+    messageOptions.message_thread_id = responseTopicId;
+  }
+
+  bot.telegram.sendMessage(
+    responseChatId,
+    `✅ ${username} повернувся!`,
+    messageOptions
+  ).catch((error) => {
+    console.error('Error sending on_duty message to topic:', error.description);
+    // Fallback: send to general chat without topic
+    const fallbackOptions = {};
+    bot.telegram.sendMessage(
+      responseChatId,
+      `✅ ${username} повернувся!`,
+      fallbackOptions
+    ).catch((fallbackError) => {
+      console.error('Fallback on_duty message also failed:', fallbackError.description);
+    });
+  });
 });
 
 // Admin commands
@@ -178,16 +325,17 @@ bot.command('admin_panel', (ctx) => {
   }
 
   const adminPanel = Markup.inlineKeyboard([
-    [Markup.button.callback('➕ Add Notification', 'add_notification')],
-    [Markup.button.callback('🗑️ Delete Notification', 'delete_notification')],
-    [Markup.button.callback('📍 Set Notification Target', 'set_notification_target')],
-    [Markup.button.callback('👑 Add Admin', 'add_admin')],
-    [Markup.button.callback('❌ Remove Admin', 'remove_admin')],
-    [Markup.button.callback('📋 View Notifications', 'view_notifications')],
-    [Markup.button.callback('👥 View Admins', 'view_admins')]
+    [Markup.button.callback('➕ Додати сповіщення', 'add_notification')],
+    [Markup.button.callback('🗑️ Видалити сповіщення', 'delete_notification')],
+    [Markup.button.callback('📍 Встановити ціль для сповіщень', 'set_notification_target')],
+    [Markup.button.callback('💬 Встановити ціль для команд', 'set_command_target')],
+    [Markup.button.callback('👑 Додати адміністратора', 'add_admin')],
+    [Markup.button.callback('❌ Видалити адміністратора', 'remove_admin')],
+    [Markup.button.callback('📋 Переглянути сповіщення', 'view_notifications')],
+    [Markup.button.callback('👥 Переглянути адміністраторів', 'view_admins')]
   ]);
 
-  ctx.reply('🔧 Admin Panel', adminPanel);
+  ctx.reply('🔧 Панель адміністратора', adminPanel);
 });
 
 // Callback query handler
@@ -215,7 +363,7 @@ bot.action(/.*/, async (ctx) => {
       return ctx.answerCbQuery('У вас не має прав адміністратора');
     }
     ctx.answerCbQuery();
-    ctx.reply('To add an admin, reply to their message with /add_admin or use:\n/add_admin <user_id>');
+    ctx.reply('Для додавання адміністратора, відповідьте на повідомлення з /add_admin або використовуйте:\n/add_admin <user_id>');
   }
   
   else if (action === 'remove_admin') {
@@ -248,15 +396,39 @@ bot.action(/.*/, async (ctx) => {
     }
     ctx.answerCbQuery();
     
-    ctx.reply('Для додавання чату для сповіщень, використовуйте наступний формат:\n/set_notification_target <chat_id> [topic_id]\n\nПриклад:\n/set_notification_target -1001234567890\n/set_notification_target -1001234567890 123\n\nЩоб отримати chat ID, перешліть повідомлення з чату в @userinfobot');
+    ctx.reply('Для встановлення цілі для сповіщень, використовуйте наступний формат:\n/set_notification_target <chat_id> [topic_id]\n\nПриклад:\n/set_notification_target -1001234567890\n/set_notification_target -1001234567890 123\n\nЩоб отримати chat ID, перешліть повідомлення з чату в @userinfobot');
+  }
+  
+  else if (action === 'set_command_target') {
+    if (!isAdmin(ctx)) {
+      return ctx.answerCbQuery('У вас не має прав адміністратора');
+    }
+    ctx.answerCbQuery();
+    
+    ctx.reply('Для встановлення цілі для відповідей на команди, використовуйте наступний формат:\n/set_command_target <chat_id> [topic_id]\n\nПриклад:\n/set_command_target -1001234567890\n/set_command_target -1001234567890 123\n\nЩоб отримати chat ID, перешліть повідомлення з чату в @userinfobot');
   }
   
   else if (action === 'im_back') {
     const userId = ctx.from.id;
     const username = ctx.from.username || ctx.from.first_name;
     
-    // Remove from out users and add to duty users
-    state.usersOut.delete(userId);
+    // Check if user was out and calculate time spent
+    const outData = state.usersOut.get(userId);
+    if (outData) {
+      const timeSpent = Date.now() - outData.timestamp;
+      updateUserTimeTracking(username, 'out', timeSpent);
+      state.usersOut.delete(userId);
+    }
+    
+    // Check if user was on lunch and calculate time spent
+    const lunchData = state.usersLunch.get(userId);
+    if (lunchData) {
+      const timeSpent = Date.now() - lunchData.timestamp;
+      updateUserTimeTracking(username, 'lunch', timeSpent);
+      state.usersLunch.delete(userId);
+    }
+    
+    // Add to duty users
     state.dutyUsers.add(userId);
     
     ctx.answerCbQuery('З поверненням!');
@@ -288,17 +460,38 @@ bot.action(/.*/, async (ctx) => {
       ctx.editMessageText('❌ Адміна видалено!');
     }
   }
+  else if (action === 'clear_notifications') {
+    if (!isAdmin(ctx)) {
+      return ctx.answerCbQuery('У вас не має прав адміністратора');
+    }
+    ctx.answerCbQuery();
+    
+    const count = state.notifications.length;
+    state.notifications = [];
+    ctx.reply(`✅ Всі сповіщення очищено (${count} сповіщень видалено).`);
+  }
+  
+  else if (action === 'reset_notification_target') {
+    if (!isAdmin(ctx)) {
+      return ctx.answerCbQuery('У вас не має прав адміністратора');
+    }
+    ctx.answerCbQuery();
+    
+    state.defaultNotificationChat = null;
+    state.defaultNotificationTopic = null;
+    ctx.reply('✅ Ціль для сповіщень скинуто. Встановіть нову ціль за допомогою /set_notification_target.');
+  }
 });
 
 // Admin command handlers
 bot.command('add_notification', (ctx) => {
   if (!isAdmin(ctx)) {
-    return ctx.reply('У вас не має прав адміністратора');
+    return ctx.reply('You do not have admin privileges.');
   }
 
   // Only allow in private chats
   if (ctx.chat.type !== 'private') {
-    return ctx.reply('Ця команда доступна лише в особистих повідомленнях з ботом.');
+    return ctx.reply('This command is only available in private chat with the bot.');
   }
 
   const args = ctx.message.text.split(' ').slice(1);
@@ -306,7 +499,7 @@ bot.command('add_notification', (ctx) => {
     return ctx.reply('Usage: /add_notification <time> <message>\nExample: /add_notification "09:30" "Good morning team!"');
   }
 
-  const timeInput = args[0].replace(/^["']|["']$/g, ''); // Remove quotes if present
+  const timeInput = args[0].replace(/^\"|\"$/g, ''); // Remove quotes if present
   const message = args.slice(1).join(' ');
 
   // Parse time format (HH:MM)
@@ -314,7 +507,7 @@ bot.command('add_notification', (ctx) => {
   const timeMatch = timeInput.match(timeRegex);
 
   if (!timeMatch) {
-    return ctx.reply('Невірний формат часу. Будь ласка, використовуйте формат HH:MM (наприклад, 09:30, 14:15, 18:00)');
+    return ctx.reply('Invalid time format. Please use HH:MM format (e.g., 09:30, 14:15, 18:00)');
   }
 
   const hour = parseInt(timeMatch[1]);
@@ -322,27 +515,70 @@ bot.command('add_notification', (ctx) => {
 
   // Validate hour and minute ranges
   if (hour < 0 || hour > 23) {
-    return ctx.reply('Невірно вказано години. Будь ласка, використовуйте формат 0-23 для годин.');
+    return ctx.reply('Invalid hour. Please use 0-23 for hours.');
   }
   if (minute < 0 || minute > 59) {
-    return ctx.reply('Невірно вказано хвилини. Будь ласка, використовуйте формат 0-59 для хвилин.');
+    return ctx.reply('Invalid minute. Please use 0-59 for minutes.');
   }
-
-  // Convert to cron expression (minute hour * * *)
-  const cronTime = `${minute} ${hour} * * *`;
 
   // Check if default notification target is set
   if (!state.defaultNotificationChat) {
-    return ctx.reply('❌ Не вказано чат для сповіщень. Будь ласка, скористайтесь панелю адміністратора та встановіть чат для сповіщень.');
+    return ctx.reply('❌ Ціль для сповіщень не встановлена. Будь ласка, спочатку використовуйте панель адміністратора для встановлення цілі.');
   }
+
+  // Use the default notification target
+  const topicId = state.defaultNotificationTopic;
+
+  // Check if server timezone differs from USER_TIMEZONE
+  const serverTimezone = SERVER_TIMEZONE; // Use dynamically detected timezone
+  const userTimezone = USER_TIMEZONE;
+  
+  let convertedTime = timeInput;
+  let conversionMessage = '';
+  
+  // Compare timezone offsets instead of string representations
+  const serverOffset = moment.tz(serverTimezone).format('Z'); // Get offset like "+03:00"
+  const userOffset = moment.tz(userTimezone).format('Z'); // Get offset like "+03:00"
+  
+  if (serverOffset !== userOffset) {
+    // Input time is in USER_TIMEZONE, convert to server timezone
+    const userTime = moment.tz({ hour, minute }, userTimezone);
+    const serverTime = userTime.clone().tz(serverTimezone);
+    const serverHour = serverTime.hour();
+    const serverMinute = serverTime.minute();
+    
+    convertedTime = `${serverHour.toString().padStart(2, '0')}:${serverMinute.toString().padStart(2, '0')}`;
+    conversionMessage = `\n⏰ Конвертовано з ${userTimezone} (${timeInput}) до ${serverTimezone} (${convertedTime})`;
+  }
+
+  // Convert to UTC for cron scheduling only if timezones differ
+  let utcHour, utcMinute;
+  
+  if (serverOffset !== userOffset) {
+    // Timezones differ - convert to UTC for cron
+    const timezoneForCron = serverTimezone;
+    const timeForCron = moment.tz({ 
+      hour: parseInt(convertedTime.split(':')[0]), 
+      minute: parseInt(convertedTime.split(':')[1]) 
+    }, timezoneForCron);
+    utcHour = timeForCron.clone().tz('UTC').hour();
+    utcMinute = timeForCron.clone().tz('UTC').minute();
+  } else {
+    // Same timezone - use input time directly for cron (no UTC conversion needed)
+    utcHour = parseInt(convertedTime.split(':')[0]);
+    utcMinute = parseInt(convertedTime.split(':')[1]);
+  }
+
+  // Convert to cron expression (minute hour * * *)
+  const cronTime = `${utcMinute} ${utcHour} * * *`;
 
   const notification = {
     id: Date.now(),
     cronTime: cronTime,
-    originalTime: timeInput, // Store original time for display
+    originalTime: convertedTime, // Store converted time for display
     message: message,
     chatId: state.defaultNotificationChat,
-    topicId: state.defaultNotificationTopic
+    topicId: topicId
   };
 
   state.notifications.push(notification);
@@ -350,7 +586,8 @@ bot.command('add_notification', (ctx) => {
   // Schedule the notification
   scheduleNotification(notification);
 
-  ctx.reply(`✅ Сповіщення успішно додано!\ Час: ${timeInput} (кожень день)\n Повідомлення: ${message}`);
+  const topicInfo = topicId ? ` (ID теми: ${topicId})` : '';
+  ctx.reply(`✅ Сповіщення успішно додано!${conversionMessage}\nЧас: ${convertedTime} (${userTimezone}, буде виконано о ${utcHour.toString().padStart(2, '0')}:${utcMinute.toString().padStart(2, '0')} UTC)${topicInfo}\nПовідомлення: ${message}`);
 });
 
 bot.command('delete_notification', (ctx) => {
@@ -443,9 +680,9 @@ bot.command('set_notification_target', (ctx) => {
     const chatInfo = chat.title || chat.username || chat.id;
     const topicInfo = topicId ? ` (topic ID: ${topicId})` : '';
     
-    ctx.reply(`✅ Ціль сповіщення встановлено: ${chatInfo}${topicInfo}\n\nВсі сповіщення будуть відправлятися до цього чату/topic.`);
+    ctx.reply(`✅ Ціль для сповіщень встановлено: ${chatInfo}${topicInfo}\n\nВсі сповіщення будуть відправлятися до цього чату/topic.`);
   }).catch((error) => {
-    ctx.reply(`❌ Помилка при встановленні цілі сповіщення: ${error.description}\n\n Переконайтесь:\n1. Бота додано до групи\n2. Сhat ID вказано вірно\n3. Topic ID вірний (якщо вказано)`);
+    ctx.reply(`❌ Помилка при встановленні цілі для сповіщень: ${error.description}\n\n Переконайтесь:\n1. Бота додано до групи\n2. Сhat ID вказано вірно\n3. Topic ID вірний (якщо вказано)`);
   });
 });
 
@@ -460,13 +697,89 @@ bot.command('notification_target', (ctx) => {
   }
 
   if (!state.defaultNotificationChat) {
-    return ctx.reply('❌ Не встановлено цілі для сповіщення. Використовуйте команду /set_notification_target для встановлення цілі.');
+    return ctx.reply('❌ Ціль для сповіщень не встановлена. Будь ласка, використовуйте команду /set_notification_target для встановлення цілі.');
   }
 
   const chatInfo = `Chat ID: ${state.defaultNotificationChat}`;
   const topicInfo = state.defaultNotificationTopic ? `\nTopic ID: ${state.defaultNotificationTopic}` : '\nЧат: Загальний чат (не уточнено чат)';
   
-  ctx.reply(`📍 Current notification target:\n${chatInfo}${topicInfo}`);
+  ctx.reply(`📍 Поточна ціль для сповіщень:\n${chatInfo}${topicInfo}`);
+});
+
+bot.command('command_target', (ctx) => {
+  if (!isAdmin(ctx)) {
+    return ctx.reply('У вас не має прав адміністратора');
+  }
+
+  // Only allow in private chats
+  if (ctx.chat.type !== 'private') {
+    return ctx.reply('Ця команда доступна лише в особистих повідомленнях з ботом.');
+  }
+
+  if (!state.defaultCommandChat) {
+    return ctx.reply('❌ Не встановлено цілі для відповідей на команди. Використовуйте /set_command_target для встановлення цілі.');
+  }
+
+  const chatInfo = `Chat ID: ${state.defaultCommandChat}`;
+  const topicInfo = state.defaultCommandTopic ? `\nTopic ID: ${state.defaultCommandTopic}` : '\nЧат: Загальний чат (не уточнено чат)';
+  
+  ctx.reply(`💬 Поточна ціль для відповідей на команди:\n${chatInfo}${topicInfo}`);
+});
+
+bot.command('set_command_target', (ctx) => {
+  if (!isAdmin(ctx)) {
+    return ctx.reply('У вас не має прав адміністратора');
+  }
+
+  // Only allow in private chats
+  if (ctx.chat.type !== 'private') {
+    return ctx.reply('Ця команда доступна лише в особистих повідомленнях з ботом.');
+  }
+
+  const args = ctx.message.text.split(' ').slice(1);
+  if (args.length < 1) {
+    return ctx.reply('Використовуйте: /set_command_target <chat_id> [topic_id]\n\n Приклад:\n/set_command_target -1001234567890\n/set_command_target -1001234567890 123\n\n Щоб отримати chat ID, перешліть повідомлення з цього чату в @userinfobot');
+  }
+
+  const chatId = parseInt(args[0]);
+  const topicId = args[1] ? parseInt(args[1]) : null;
+
+  if (isNaN(chatId)) {
+    return ctx.reply('Невірний chat ID. Будь ласка, надайте коректний chat ID.');
+  }
+
+  if (args[1] && isNaN(topicId)) {
+    return ctx.reply('Невірний topic ID. Будь ласка, надайте коректний topic ID.');
+  }
+
+  // Test if we can access the chat
+  bot.telegram.getChat(chatId).then((chat) => {
+    state.defaultCommandChat = chatId;
+    state.defaultCommandTopic = topicId;
+    
+    const chatInfo = chat.title || chat.username || chat.id;
+    const topicInfo = topicId ? ` (topic ID: ${topicId})` : '';
+    
+    ctx.reply(`✅ Ціль для відповідей на команди встановлено: ${chatInfo}${topicInfo}\n\nВсі відповіді на команди будуть відправлятися до цього чату/topic.`);
+  }).catch((error) => {
+    ctx.reply(`❌ Помилка при встановленні цілі для команд: ${error.description}\n\n Переконайтесь:\n1. Бота додано до групи\n2. Сhat ID вказано вірно\n3. Topic ID вірний (якщо вказано)`);
+  });
+});
+
+bot.command('clear_command_target', (ctx) => {
+  if (!isAdmin(ctx)) {
+    return ctx.reply('У вас не має прав адміністратора');
+  }
+
+  // Only allow in private chats
+  if (ctx.chat.type !== 'private') {
+    return ctx.reply('Ця команда доступна лише в особистих повідомленнях з ботом.');
+  }
+
+  state.defaultCommandChat = null;
+  state.defaultCommandTopic = null;
+  
+  ctx.reply('✅ Ціль для відповідей на команди очищено. Відповіді будуть відправлятися в той же чат, де використовується команда.');
 });
 
 // Helper functions
@@ -493,7 +806,7 @@ function showAdminsForRemoval(ctx) {
 
   const buttons = Array.from(state.admins).map(adminId => [
     Markup.button.callback(
-      `❌ Remove Admin ${adminId}`,
+      `❌ Видалити адміністратора ${adminId}`,
       `remove_admin_${adminId}`
     )
   ]);
@@ -532,7 +845,16 @@ function scheduleNotification(notification) {
       messageOptions.message_thread_id = notification.topicId;
     }
     
-    bot.telegram.sendMessage(notification.chatId, notification.message, messageOptions);
+    bot.telegram.sendMessage(notification.chatId, notification.message, messageOptions)
+      .catch((error) => {
+        console.error('Error sending scheduled notification to topic:', error.description);
+        // Fallback: send to general chat without topic
+        const fallbackOptions = {};
+        bot.telegram.sendMessage(notification.chatId, notification.message, fallbackOptions)
+          .catch((fallbackError) => {
+            console.error('Fallback scheduled notification also failed:', fallbackError.description);
+          });
+      });
   });
 }
 
@@ -557,13 +879,185 @@ function pingUserIfStillOut(userId) {
     userData.chatId,
     `🔔 @${userData.username} Час повертатись!`,
     messageOptions
-  );
+  ).catch((error) => {
+    console.error('Error sending ping message to topic:', error.description);
+    // Fallback: send to general chat without topic
+    const fallbackOptions = {
+      reply_markup: keyboard.reply_markup
+    };
+    bot.telegram.sendMessage(
+      userData.chatId,
+      `🔔 @${userData.username} Час повертатись!`,
+      fallbackOptions
+    ).catch((fallbackError) => {
+      console.error('Fallback ping message also failed:', fallbackError.description);
+    });
+  });
 
   // Schedule next ping in 15 minutes
   setTimeout(() => {
     pingUserIfStillOut(userId);
   }, 15 * 60 * 1000);
 }
+
+function updateUserTimeTracking(username, type, timeSpent) {
+  if (!state.userTimeTracking.has(username)) {
+    state.userTimeTracking.set(username, {
+      totalOutTime: 0,
+      totalLunchTime: 0
+    });
+  }
+  
+  const tracking = state.userTimeTracking.get(username);
+  
+  if (type === 'out') {
+    tracking.totalOutTime += timeSpent;
+  } else if (type === 'lunch') {
+    tracking.totalLunchTime += timeSpent;
+  }
+}
+
+function pingUserIfStillLunch(userId) {
+  const userData = state.usersLunch.get(userId);
+  if (!userData) return; // User is back on duty
+
+  const keyboard = Markup.inlineKeyboard([
+    [Markup.button.callback('Я повернувся', 'im_back')]
+  ]);
+
+  const messageOptions = {
+    reply_markup: keyboard.reply_markup
+  };
+
+  // Use the stored topic ID if available
+  if (userData.topicId) {
+    messageOptions.message_thread_id = userData.topicId;
+  }
+
+  bot.telegram.sendMessage(
+    userData.chatId,
+    `🍽️ @${userData.username} Час повертатися з обіду!`,
+    messageOptions
+  ).catch((error) => {
+    console.error('Error sending lunch ping message to topic:', error.description);
+    // Fallback: send to general chat without topic
+    const fallbackOptions = {
+      reply_markup: keyboard.reply_markup
+    };
+    bot.telegram.sendMessage(
+      userData.chatId,
+      `🍽️ @${userData.username} Час повертатися з обіду!`,
+      fallbackOptions
+    ).catch((fallbackError) => {
+      console.error('Fallback lunch ping message also failed:', fallbackError.description);
+    });
+  });
+
+  // Schedule next ping in 30 minutes
+  setTimeout(() => {
+    pingUserIfStillLunch(userId);
+  }, 30 * 60 * 1000);
+}
+
+async function saveTimeTrackingToGoogleSheets() {
+  try {
+    const spreadsheetId = process.env.GOOGLE_SPREADSHEET_ID;
+    if (!spreadsheetId) {
+      console.log('Google Spreadsheet ID not configured, skipping data save');
+      return;
+    }
+
+    const today = moment().tz(USER_TIMEZONE);
+    const monthYear = today.format('YYYY-MM'); // e.g., "2024-01"
+    const sheetName = `Sheet_${monthYear}`;
+    const rows = [];
+
+    // Prepare data for current users
+    for (const [username, tracking] of state.userTimeTracking) {
+      const outHours = Math.round((tracking.totalOutTime / (1000 * 60 * 60)) * 100) / 100;
+      const lunchHours = Math.round((tracking.totalLunchTime / (1000 * 60 * 60)) * 100) / 100;
+      
+      rows.push([
+        today.format('YYYY-MM-DD'),
+        username,
+        outHours,
+        lunchHours
+      ]);
+    }
+
+    if (rows.length > 0) {
+      try {
+        // Try to append to existing sheet
+        await sheets.spreadsheets.values.append({
+          spreadsheetId,
+          range: `${sheetName}!A:D`,
+          valueInputOption: 'RAW',
+          insertDataOption: 'INSERT_ROWS',
+          resource: {
+            values: rows
+          }
+        });
+      } catch (error) {
+        if (error.code === 400 && error.message.includes('Unable to parse range')) {
+          // Sheet doesn't exist, create it first
+          await sheets.spreadsheets.batchUpdate({
+            spreadsheetId,
+            resource: {
+              requests: [
+                {
+                  addSheet: {
+                    properties: {
+                      title: sheetName
+                    }
+                  }
+                }
+              ]
+            }
+          });
+
+          // Add headers to the new sheet
+          await sheets.spreadsheets.values.update({
+            spreadsheetId,
+            range: `${sheetName}!A1:D1`,
+            valueInputOption: 'RAW',
+            resource: {
+              values: [['Дата', 'Користувач', 'Години відсутності', 'Години обіду']]
+            }
+          });
+
+          // Now append the data
+          await sheets.spreadsheets.values.append({
+            spreadsheetId,
+            range: `${sheetName}!A:D`,
+            valueInputOption: 'RAW',
+            insertDataOption: 'INSERT_ROWS',
+            resource: {
+              values: rows
+            }
+          });
+        } else {
+          throw error;
+        }
+      }
+      
+      console.log(`Saved time tracking data for ${rows.length} users to Google Sheets (${sheetName})`);
+      
+      // Clear the tracking data after saving
+      state.userTimeTracking.clear();
+    }
+  } catch (error) {
+    console.error('Error saving to Google Sheets:', error);
+  }
+}
+
+// Schedule daily data save at 23:00 Ukrainian time
+const saveTimeCron = '0 23 * * *'; // 23:00 daily
+cron.schedule(saveTimeCron, () => {
+  console.log('Running daily time tracking save...');
+  saveTimeTrackingToGoogleSheets();
+}, {
+  timezone: USER_TIMEZONE
+});
 
 // Error handling
 bot.catch((err, ctx) => {

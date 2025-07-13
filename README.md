@@ -47,7 +47,30 @@ BOT_TOKEN=your_bot_token_here
 
 # Default Admin IDs (optional - comma-separated list of Telegram user IDs)
 DEFAULT_ADMIN_ID=123456789,987654321,555666777
+
+# Timezone settings
+USER_TIMEZONE=Europe/Kiev
+
+# Google Sheets integration (optional)
+GOOGLE_SERVICE_ACCOUNT_KEY=service-account-key.json
+GOOGLE_SPREADSHEET_ID=your_spreadsheet_id_here
+
+# Command responses target (optional)
+DEFAULT_COMMAND_CHAT_ID=your_command_chat_id_here
 ```
+
+### 4. Google Sheets Setup (Optional)
+For time tracking functionality:
+1. Create a Google Cloud Project
+2. Enable Google Sheets API
+3. Create a Service Account and download the JSON key file
+4. Create a Google Spreadsheet and share it with the service account email
+5. Copy the spreadsheet ID from the URL
+
+**Data Structure:**
+- Monthly worksheets are automatically created (e.g., "Sheet_2024-01", "Sheet_2024-02")
+- Each worksheet contains: Date | User | Out Hours | Lunch Hours
+- Data is saved daily at 23:00 Ukrainian time
 
 ### 4. Run the Bot
 ```bash
@@ -78,7 +101,7 @@ npm run dev
 2. **Add Notifications**: Use `/admin_panel` → "Add Notification" or `/add_notification <HH:MM> <message>`
 3. **Example**: `/add_notification "09:30" "Good morning team!"`
 
-**Note**: You must set a notification target before adding notifications.
+**Note**: You must set a notification target before adding notifications. The bot will use the default notification target (chat/topic) that was configured.
 
 ### Time Format Examples
 - `"09:30"` - Every day at 9:30 AM
@@ -101,6 +124,12 @@ npm run dev
 | `/lunch` | Mark yourself as on lunch break |
 | `/on_duty` | Mark yourself as back on duty |
 
+### Timezone Support
+- The bot automatically detects the server's timezone at startup
+- User timezone is configurable via USER_TIMEZONE environment variable (defaults to Europe/Kiev)
+- Time conversions are shown in confirmation messages when adding notifications
+- All times are converted to UTC for scheduling, ensuring consistent execution regardless of server location
+
 ### Admin Commands
 | Command | Description |
 |---------|-------------|
@@ -108,7 +137,9 @@ npm run dev
 | `/add_notification <HH:MM> <message>` | Add daily notification |
 | `/delete_notification` | Remove scheduled notification |
 | `/set_notification_target <chat_id> [topic_id]` | Set notification target |
+| `/set_command_target <chat_id> [topic_id]` | Set command responses target |
 | `/notification_target` | Check current notification target |
+| `/command_target` | Check current command responses target |
 | `/add_admin <user_id>` | Add new admin |
 | `/delete_admin` | Remove admin |
 
