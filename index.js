@@ -2,50 +2,35 @@ require('dotenv').config();
 const { Telegraf, Markup } = require('telegraf');
 const cron = require('node-cron');
 const moment = require('moment-timezone');
-const { google } = require('googleapis');
+const { connectDB } = require('./src/config/db');
+const { Notification, Config, User, Role } = require('./src/models');
+const { getServerTimezone } = require('./src/utils/timezone');
+const { getStatusMessage } = require('./src/utils/helpers');
+const { scheduleNotification } = require('./src/utils/cron');
+const { saveTimeTrackingToGoogleSheets } = require('./src/utils/sheets');
+const { isAdmin: isAdminBase, isGroupTopic } = require('./src/middleware/auth');
+
+// Middleware wrapper for state
+const isAdmin = (ctx) => isAdminBase(state, ctx);
 
 // Timezone configuration
-const USER_TIMEZONE = process.env.USER_TIMEZONE || 'Europe/Kiev'; // User timezone (configurable)
-
-// Get server's current timezone dynamically
-function getServerTimezone() {
-  try {
-    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
-    if (tz) {
-      console.log(`Server timezone detected: ${tz}`);
-      return tz;
-    }
-    throw new Error('Could not detect timezone');
-  } catch (error) {
-    console.error('Error detecting server timezone:', error);
-    return 'UTC'; // Fallback to UTC
-  }
-}
-
+const USER_TIMEZONE = process.env.USER_TIMEZONE || 'Europe/Kiev'; 
 const SERVER_TIMEZONE = getServerTimezone();
 
-// Google Sheets configuration
-const auth = new google.auth.GoogleAuth({
-  keyFile: process.env.GOOGLE_SERVICE_ACCOUNT_KEY || 'service-account-key.json',
-  scopes: ['https://www.googleapis.com/auth/spreadsheets'],
-});
-
-const sheets = google.sheets({ version: 'v4', auth });
-
-// Bot token from environment variables
+// Bot instance
 const bot = new Telegraf(process.env.BOT_TOKEN);
 
-// In-memory storage (in production, use a database)
+// In-memory storage
 const state = {
   admins: new Set(),
   notifications: [],
-  usersOut: new Map(), // userId -> { timestamp, username }
-  usersLunch: new Map(), // userId -> { timestamp, username }
+  usersOut: new Map(), // userId -> { timestamp, chatId, messageId, username, type: 'out' }
+  usersLunch: new Map(), // userId -> { timestamp, chatId, messageId, username, type: 'lunch' }
   dutyUsers: new Set(),
-  defaultNotificationChat: null, // Default chat for notifications
-  defaultNotificationTopic: null, // Default topic for notifications
-  defaultCommandChat: null, // Default chat for command responses
-  defaultCommandTopic: null, // Default topic for command responses
+  defaultNotificationChat: null,
+  defaultNotificationTopic: null,
+  defaultCommandChat: null,
+  defaultCommandTopic: null,
   userTimeTracking: new Map(), // username -> { totalOutTime: 0, totalLunchTime: 0 }
   userTimezones: new Map() // userId -> timezone
 };
@@ -63,16 +48,6 @@ if (process.env.DEFAULT_ADMIN_ID) {
     }
   });
 }
-
-// Middleware to check if user is admin
-const isAdmin = (ctx) => {
-  return state.admins.has(ctx.from.id);
-};
-
-// Middleware to check if message is from a group topic
-const isGroupTopic = (ctx) => {
-  return ctx.chat.type === 'supergroup' && ctx.message?.is_topic_message;
-};
 
 // Start command
 bot.start((ctx) => {
@@ -105,9 +80,12 @@ bot.help((ctx) => {
 /lunch - Відмітити себе як "на обіді"
 /on_duty - Відмітити себе як "на місці"
 /set_timezone - Встановити персональну таймзону
+/my_role - Перевірити свою роль
 
 👑 Адмін-команди:
 /admin_panel - Відкрити панель адміністратора
+/add_role <назва_ролі> - Додати нову роль
+/assign_role <@username> <назва_ролі> - Призначити роль користувачу
 /add_notification - Додати нове сповіщення
 /delete_notification - Видалити сповіщення
 /set_notification_target - Встановити ціль для сповіщень (група/топік)
@@ -131,6 +109,7 @@ bot.help((ctx) => {
 /lunch - Відмітити себе як "на обіді"
 /on_duty - Відмітити себе як "на місці"
 /set_timezone - Встановити персональну таймзону
+/my_role - Перевірити свою роль
 
 📝 Ці команди працюють лише у групових топіках.
 Зверніться до адміністратора для додаткових можливостей.
@@ -139,8 +118,13 @@ bot.help((ctx) => {
   }
 });
 
+// Helper to get users status message
+async function getStatusMessageProxy() {
+  return getStatusMessage(state);
+}
+
 // User commands (only work in group topics)
-bot.command('out', (ctx) => {
+bot.command('out', async (ctx) => {
   if (!isGroupTopic(ctx)) {
     return ctx.reply('Ця команда доступна лише в групових чатах ');
   }
@@ -148,21 +132,48 @@ bot.command('out', (ctx) => {
   const userId = ctx.from.id;
   const username = ctx.from.username || ctx.from.first_name;
   
+  // Update or create user in DB
+  const user = await User.findOneAndUpdate(
+    { username: ctx.from.username || username },
+    { userId: userId, username: ctx.from.username || username },
+    { upsert: true, new: true }
+  ).catch(err => {
+    console.error('Error updating user in DB:', err);
+    return null;
+  });
+
+  const roleStr = user && user.role ? ` (${user.role})` : '';
+
   // Remove from duty users
   state.dutyUsers.delete(userId);
   
-  // Mark as out - only store timestamp and username
+  // Mark as out - use notification target if set, otherwise use current chat
+  const targetChatId = state.defaultNotificationChat || ctx.chat.id;
+  const targetTopicId = state.defaultNotificationTopic || null;
+  
+  console.log('User going out:', {
+    userId: userId,
+    username: username,
+    targetChatId: targetChatId,
+    targetTopicId: targetTopicId,
+    defaultNotificationChat: state.defaultNotificationChat,
+    defaultNotificationTopic: state.defaultNotificationTopic
+  });
+  
   state.usersOut.set(userId, {
     timestamp: Date.now(),
+    chatId: targetChatId,
+    topicId: targetTopicId,
+    messageId: ctx.message.message_id,
     username: username
   });
 
-  // Always send response to command target
-  const responseChatId = state.defaultCommandChat;
-  const responseTopicId = state.defaultCommandTopic;
-  if (!responseChatId) {
-    return ctx.reply('❌ Не встановлено цілі для відповідей на команди. Використовуйте /set_command_target для встановлення цілі.');
-  }
+  const statusMsg = await getStatusMessageProxy();
+
+  // Send response to command target if set, otherwise to current chat
+  const responseChatId = state.defaultCommandChat || ctx.chat.id;
+  const responseTopicId = state.defaultCommandTopic !== null ? state.defaultCommandTopic : (ctx.message?.message_thread_id || null);
+  
   const messageOptions = {};
   if (responseTopicId) {
     messageOptions.message_thread_id = responseTopicId;
@@ -170,10 +181,19 @@ bot.command('out', (ctx) => {
 
   bot.telegram.sendMessage(
     responseChatId,
-    `👋 ${username} вийшов. Пінганемо через 15 хвилин, якщо не повернешся.`,
+    `👋 @${username}${roleStr} вийшов. Пінганемо через 15 хвилин, якщо не повернешся.${statusMsg}`,
     messageOptions
   ).catch((error) => {
     console.error('Error sending message to topic:', error.description);
+    // Fallback: send to general chat without topic
+    const fallbackOptions = {};
+    bot.telegram.sendMessage(
+      responseChatId,
+      `👋 ${username}${roleStr} вийшов. Пінганемо через 15 хвилин, якщо не повернешся.${statusMsg}`,
+      fallbackOptions
+    ).catch((fallbackError) => {
+      console.error('Fallback message also failed:', fallbackError.description);
+    });
   });
   
   // Schedule first ping in 15 minutes
@@ -182,7 +202,7 @@ bot.command('out', (ctx) => {
   }, 15 * 60 * 1000);
 });
 
-bot.command('lunch', (ctx) => {
+bot.command('lunch', async (ctx) => {
   if (!isGroupTopic(ctx)) {
     return ctx.reply('Ця команда доступна лише в групових чатах ');
   }
@@ -190,21 +210,39 @@ bot.command('lunch', (ctx) => {
   const userId = ctx.from.id;
   const username = ctx.from.username || ctx.from.first_name;
   
+  // Update or create user in DB
+  const user = await User.findOneAndUpdate(
+    { username: ctx.from.username || username },
+    { userId: userId, username: ctx.from.username || username },
+    { upsert: true, new: true }
+  ).catch(err => {
+    console.error('Error updating user in DB:', err);
+    return null;
+  });
+
+  const roleStr = user && user.role ? ` (${user.role})` : '';
+
   // Remove from duty users
   state.dutyUsers.delete(userId);
   
-  // Mark as lunch - only store timestamp and username
+  // Mark as lunch - use notification target if set, otherwise use current chat
+  const targetChatId = state.defaultNotificationChat || ctx.chat.id;
+  const targetTopicId = state.defaultNotificationTopic || null;
+  
   state.usersLunch.set(userId, {
     timestamp: Date.now(),
+    chatId: targetChatId,
+    topicId: targetTopicId,
+    messageId: ctx.message.message_id,
     username: username
   });
 
-  // Always send response to command target
-  const responseChatId = state.defaultCommandChat;
-  const responseTopicId = state.defaultCommandTopic;
-  if (!responseChatId) {
-    return ctx.reply('❌ Не встановлено цілі для відповідей на команди. Використовуйте /set_command_target для встановлення цілі.');
-  }
+  const statusMsg = await getStatusMessageProxy();
+
+  // Send response to command target if set, otherwise to current chat
+  const responseChatId = state.defaultCommandChat || ctx.chat.id;
+  const responseTopicId = state.defaultCommandTopic !== null ? state.defaultCommandTopic : (ctx.message?.message_thread_id || null);
+  
   const messageOptions = {};
   if (responseTopicId) {
     messageOptions.message_thread_id = responseTopicId;
@@ -212,10 +250,19 @@ bot.command('lunch', (ctx) => {
 
   bot.telegram.sendMessage(
     responseChatId,
-    `🍽️ ${username} вийшов на обід. Пінганемо через 30 хвилин, якщо не повернешся.`,
+    `🍽️ @${username}${roleStr} вийшов на обід. Пінганемо через 30 хвилин, якщо не повернешся.${statusMsg}`,
     messageOptions
   ).catch((error) => {
     console.error('Error sending lunch message to topic:', error.description);
+    // Fallback: send to general chat without topic
+    const fallbackOptions = {};
+    bot.telegram.sendMessage(
+      responseChatId,
+      `🍽️ ${username}${roleStr} вийшов на обід. Пінганемо через 30 хвилин, якщо не повернешся.${statusMsg}`,
+      fallbackOptions
+    ).catch((fallbackError) => {
+      console.error('Fallback lunch message also failed:', fallbackError.description);
+    });
   });
   
   // Schedule first ping in 30 minutes
@@ -224,7 +271,7 @@ bot.command('lunch', (ctx) => {
   }, 30 * 60 * 1000);
 });
 
-bot.command('on_duty', (ctx) => {
+bot.command('on_duty', async (ctx) => {
   if (!isGroupTopic(ctx)) {
     return ctx.reply('Ця команда доступна лише в групових чатах ');
   }
@@ -232,6 +279,18 @@ bot.command('on_duty', (ctx) => {
   const userId = ctx.from.id;
   const username = ctx.from.username || ctx.from.first_name;
   
+  // Update or create user in DB
+  const user = await User.findOneAndUpdate(
+    { username: ctx.from.username || username },
+    { userId: userId, username: ctx.from.username || username },
+    { upsert: true, new: true }
+  ).catch(err => {
+    console.error('Error updating user in DB:', err);
+    return null;
+  });
+
+  const roleStr = user && user.role ? ` (${user.role})` : '';
+
   // Check if user was out and calculate time spent
   const outData = state.usersOut.get(userId);
   if (outData) {
@@ -251,12 +310,12 @@ bot.command('on_duty', (ctx) => {
   // Add to duty users
   state.dutyUsers.add(userId);
 
-  // Always send response to command target
-  const responseChatId = state.defaultCommandChat;
-  const responseTopicId = state.defaultCommandTopic;
-  if (!responseChatId) {
-    return ctx.reply('❌ Не встановлено цілі для відповідей на команди. Використовуйте /set_command_target для встановлення цілі.');
-  }
+  const statusMsg = await getStatusMessageProxy();
+
+  // Send response to command target if set, otherwise to current chat
+  const responseChatId = state.defaultCommandChat || ctx.chat.id;
+  const responseTopicId = state.defaultCommandTopic !== null ? state.defaultCommandTopic : (ctx.message?.message_thread_id || null);
+  
   const messageOptions = {};
   if (responseTopicId) {
     messageOptions.message_thread_id = responseTopicId;
@@ -264,11 +323,43 @@ bot.command('on_duty', (ctx) => {
 
   bot.telegram.sendMessage(
     responseChatId,
-    `✅ ${username} повернувся!`,
+    `✅ @${username}${roleStr} повернувся!${statusMsg}`,
     messageOptions
   ).catch((error) => {
     console.error('Error sending on_duty message to topic:', error.description);
+    // Fallback: send to general chat without topic
+    const fallbackOptions = {};
+    bot.telegram.sendMessage(
+      responseChatId,
+      `✅ ${username}${roleStr} повернувся!${statusMsg}`,
+      fallbackOptions
+    ).catch((fallbackError) => {
+      console.error('Fallback on_duty message also failed:', fallbackError.description);
+    });
   });
+});
+
+bot.command('my_role', async (ctx) => {
+  const userId = ctx.from.id;
+  const username = ctx.from.username;
+
+  try {
+    const user = await User.findOne({ 
+      $or: [
+        { userId: userId },
+        { username: username }
+      ]
+    });
+
+    if (user && user.role) {
+      ctx.reply(`Ваша роль: ${user.role}`);
+    } else {
+      ctx.reply('У вас поки що немає призначеної ролі.');
+    }
+  } catch (error) {
+    console.error('Error fetching role:', error);
+    ctx.reply('Сталася помилка при отриманні вашої ролі.');
+  }
 });
 
 // Admin commands
@@ -390,7 +481,7 @@ bot.action(/.*/, async (ctx) => {
     state.dutyUsers.add(userId);
     
     ctx.answerCbQuery('З поверненням!');
-    ctx.editMessageText(`✅ ${username} повернувся!`);
+    ctx.editMessageText(`✅ @${username} повернувся!`);
   }
   
   else if (action.startsWith('delete_notif_')) {
@@ -401,6 +492,12 @@ bot.action(/.*/, async (ctx) => {
     const index = parseInt(action.split('_')[2]);
     if (index >= 0 && index < state.notifications.length) {
       const deleted = state.notifications.splice(index, 1)[0];
+      
+      // Remove from MongoDB
+      Notification.deleteOne({ id: deleted.id }).catch(err => {
+        console.error('Error deleting notification from MongoDB:', err);
+      });
+
       ctx.answerCbQuery(`Сповіщення видалено: ${deleted.message}`);
       ctx.editMessageText(`🗑️ Знайдено сповіщення:\n"${deleted.message}"`);
     }
@@ -426,6 +523,12 @@ bot.action(/.*/, async (ctx) => {
     
     const count = state.notifications.length;
     state.notifications = [];
+
+    // Clear from MongoDB
+    Notification.deleteMany({}).catch(err => {
+      console.error('Error clearing notifications from MongoDB:', err);
+    });
+
     ctx.reply(`✅ Всі сповіщення очищено (${count} сповіщень видалено).`);
   }
   
@@ -437,12 +540,21 @@ bot.action(/.*/, async (ctx) => {
     
     state.defaultNotificationChat = null;
     state.defaultNotificationTopic = null;
+
+    // Update MongoDB config
+    Config.updateOne({ key: 'defaultNotificationChat' }, { value: null }, { upsert: true }).catch(err => {
+      console.error('Error updating notification chat in MongoDB:', err);
+    });
+    Config.updateOne({ key: 'defaultNotificationTopic' }, { value: null }, { upsert: true }).catch(err => {
+      console.error('Error updating notification topic in MongoDB:', err);
+    });
+
     ctx.reply('✅ Ціль для сповіщень скинуто. Встановіть нову ціль за допомогою /set_notification_target.');
   }
 });
 
 // Admin command handlers
-bot.command('add_notification', (ctx) => {
+bot.command('add_notification', async (ctx) => {
   if (!isAdmin(ctx)) {
     return ctx.reply('You do not have admin privileges.');
   }
@@ -487,53 +599,17 @@ bot.command('add_notification', (ctx) => {
   // Use the default notification target
   const topicId = state.defaultNotificationTopic;
 
-  // Check if server timezone differs from USER_TIMEZONE
-  const serverTimezone = SERVER_TIMEZONE; // Use dynamically detected timezone
+  // Timezone information
   const userTimezone = USER_TIMEZONE;
-  
-  let convertedTime = timeInput;
-  let conversionMessage = '';
-  
-  // Compare timezone offsets instead of string representations
-  const serverOffset = moment.tz(serverTimezone).format('Z'); // Get offset like "+03:00"
-  const userOffset = moment.tz(userTimezone).format('Z'); // Get offset like "+03:00"
-  
-  if (serverOffset !== userOffset) {
-    // Input time is in USER_TIMEZONE, convert to server timezone
-    const userTime = moment.tz({ hour, minute }, userTimezone);
-    const serverTime = userTime.clone().tz(serverTimezone);
-    const serverHour = serverTime.hour();
-    const serverMinute = serverTime.minute();
-    
-    convertedTime = `${serverHour.toString().padStart(2, '0')}:${serverMinute.toString().padStart(2, '0')}`;
-    conversionMessage = `\n⏰ Конвертовано з ${userTimezone} (${timeInput}) до ${serverTimezone} (${convertedTime})`;
-  }
+  const timeStr = `${hour.toString().padStart(2, '0')}:${minute.toString().padStart(2, '0')}`;
 
-  // Convert to UTC for cron scheduling only if timezones differ
-  let utcHour, utcMinute;
-  
-  if (serverOffset !== userOffset) {
-    // Timezones differ - convert to UTC for cron
-    const timezoneForCron = serverTimezone;
-    const timeForCron = moment.tz({ 
-      hour: parseInt(convertedTime.split(':')[0]), 
-      minute: parseInt(convertedTime.split(':')[1]) 
-    }, timezoneForCron);
-    utcHour = timeForCron.clone().tz('UTC').hour();
-    utcMinute = timeForCron.clone().tz('UTC').minute();
-  } else {
-    // Same timezone - use input time directly for cron (no UTC conversion needed)
-    utcHour = parseInt(convertedTime.split(':')[0]);
-    utcMinute = parseInt(convertedTime.split(':')[1]);
-  }
-
-  // Convert to cron expression (minute hour * * *)
-  const cronTime = `${utcMinute} ${utcHour} * * *`;
+  // Convert to cron expression (minute hour * * *) in local time
+  const cronTime = `${minute} ${hour} * * *`;
 
   const notification = {
     id: Date.now(),
     cronTime: cronTime,
-    originalTime: convertedTime, // Store converted time for display
+    originalTime: timeStr,
     message: message,
     chatId: state.defaultNotificationChat,
     topicId: topicId
@@ -541,11 +617,19 @@ bot.command('add_notification', (ctx) => {
 
   state.notifications.push(notification);
 
+  // Save to MongoDB
+  try {
+    const dbNotification = new Notification(notification);
+    await dbNotification.save();
+  } catch (error) {
+    console.error('Error saving notification to MongoDB:', error);
+  }
+
   // Schedule the notification
-  scheduleNotification(notification);
+  scheduleNotificationProxy(notification);
 
   const topicInfo = topicId ? ` (ID теми: ${topicId})` : '';
-  ctx.reply(`✅ Сповіщення успішно додано!${conversionMessage}\nЧас: ${convertedTime} (${userTimezone}, буде виконано о ${utcHour.toString().padStart(2, '0')}:${utcMinute.toString().padStart(2, '0')} UTC)${topicInfo}\nПовідомлення: ${message}`);
+  ctx.reply(`✅ Сповіщення успішно додано!\nЧас: ${timeStr} (${userTimezone})\nПовідомлення: ${message}${topicInfo}`);
 });
 
 bot.command('delete_notification', (ctx) => {
@@ -559,6 +643,72 @@ bot.command('delete_notification', (ctx) => {
   }
 
   showNotificationsForDeletion(ctx);
+});
+
+bot.command('add_role', async (ctx) => {
+  if (!isAdmin(ctx)) return;
+
+  const roleName = ctx.message.text.split(' ').slice(1).join(' ').trim();
+  if (!roleName) {
+    return ctx.reply('Використання: /add_role <назва_ролі>');
+  }
+
+  try {
+    const existingRole = await Role.findOne({ name: roleName });
+    if (existingRole) {
+      return ctx.reply(`Роль "${roleName}" вже існує.`);
+    }
+
+    const newRole = new Role({ name: roleName });
+    await newRole.save();
+    ctx.reply(`Роль "${roleName}" успішно додана.`);
+  } catch (error) {
+    console.error('Error adding role:', error);
+    ctx.reply('Помилка при додаванні ролі.');
+  }
+});
+
+bot.command('assign_role', async (ctx) => {
+  if (!isAdmin(ctx)) return;
+
+  const args = ctx.message.text.split(' ').slice(1);
+  if (args.length < 2) {
+    return ctx.reply('Використання: /assign_role <@username> <назва_ролі>');
+  }
+
+  const username = args[0].replace('@', '');
+  const roleName = args.slice(1).join(' ').trim();
+
+  try {
+    const role = await Role.findOne({ name: roleName });
+    if (!role) {
+      return ctx.reply(`Роль "${roleName}" не знайдена. Спочатку додайте її через /add_role.`);
+    }
+
+    let user = await User.findOne({ username: username });
+    if (user) {
+      user.role = roleName;
+      await user.save();
+    } else {
+      // We don't have the userId yet if the user hasn't interacted with the bot
+      // But we can create a record with just the username and role
+      // and update it later when they use a command.
+      // However, MongoDB unique index on userId might fail if we leave it null.
+      // Let's adjust the schema or handle it differently.
+      // For now, let's assume we want to update existing users or wait for them.
+      // Better: Create/Update by username, and we'll fill userId when they use /out etc.
+      user = await User.findOneAndUpdate(
+        { username: username },
+        { role: roleName },
+        { upsert: true, new: true }
+      );
+    }
+
+    ctx.reply(`Користувачу @${username} призначено роль "${roleName}".`);
+  } catch (error) {
+    console.error('Error assigning role:', error);
+    ctx.reply('Помилка при призначенні ролі.');
+  }
 });
 
 bot.command('add_admin', (ctx) => {
@@ -631,10 +781,18 @@ bot.command('set_notification_target', (ctx) => {
   }
 
   // Test if we can access the chat
-  bot.telegram.getChat(chatId).then((chat) => {
+  bot.telegram.getChat(chatId).then(async (chat) => {
     state.defaultNotificationChat = chatId;
     state.defaultNotificationTopic = topicId;
     
+    // Save to MongoDB config
+    try {
+      await Config.updateOne({ key: 'defaultNotificationChat' }, { value: chatId }, { upsert: true });
+      await Config.updateOne({ key: 'defaultNotificationTopic' }, { value: topicId }, { upsert: true });
+    } catch (error) {
+      console.error('Error saving notification target to MongoDB:', error);
+    }
+
     const chatInfo = chat.title || chat.username || chat.id;
     const topicInfo = topicId ? ` (topic ID: ${topicId})` : '';
     
@@ -711,10 +869,18 @@ bot.command('set_command_target', (ctx) => {
   }
 
   // Test if we can access the chat
-  bot.telegram.getChat(chatId).then((chat) => {
+  bot.telegram.getChat(chatId).then(async (chat) => {
     state.defaultCommandChat = chatId;
     state.defaultCommandTopic = topicId;
     
+    // Save to MongoDB config
+    try {
+      await Config.updateOne({ key: 'defaultCommandChat' }, { value: chatId }, { upsert: true });
+      await Config.updateOne({ key: 'defaultCommandTopic' }, { value: topicId }, { upsert: true });
+    } catch (error) {
+      console.error('Error saving command target to MongoDB:', error);
+    }
+
     const chatInfo = chat.title || chat.username || chat.id;
     const topicInfo = topicId ? ` (topic ID: ${topicId})` : '';
     
@@ -724,7 +890,7 @@ bot.command('set_command_target', (ctx) => {
   });
 });
 
-bot.command('clear_command_target', (ctx) => {
+bot.command('clear_command_target', async (ctx) => {
   if (!isAdmin(ctx)) {
     return ctx.reply('У вас не має прав адміністратора');
   }
@@ -737,6 +903,14 @@ bot.command('clear_command_target', (ctx) => {
   state.defaultCommandChat = null;
   state.defaultCommandTopic = null;
   
+  // Update MongoDB config
+  try {
+    await Config.updateOne({ key: 'defaultCommandChat' }, { value: null }, { upsert: true });
+    await Config.updateOne({ key: 'defaultCommandTopic' }, { value: null }, { upsert: true });
+  } catch (error) {
+    console.error('Error clearing command target from MongoDB:', error);
+  }
+
   ctx.reply('✅ Ціль для відповідей на команди очищено. Відповіді будуть відправлятися в той же чат, де використовується команда.');
 });
 
@@ -794,26 +968,9 @@ function showAdmins(ctx) {
   ctx.reply(`👑 Адміністратори: ${adminsList}`);
 }
 
-function scheduleNotification(notification) {
-  cron.schedule(notification.cronTime, () => {
-    const messageOptions = {};
-    
-    // If there's a topic ID, add it to the message options
-    if (notification.topicId) {
-      messageOptions.message_thread_id = notification.topicId;
-    }
-    
-    bot.telegram.sendMessage(notification.chatId, notification.message, messageOptions)
-      .catch((error) => {
-        console.error('Error sending scheduled notification to topic:', error.description);
-        // Fallback: send to general chat without topic
-        const fallbackOptions = {};
-        bot.telegram.sendMessage(notification.chatId, notification.message, fallbackOptions)
-          .catch((fallbackError) => {
-            console.error('Fallback scheduled notification also failed:', fallbackError.description);
-          });
-      });
-  });
+// Helper to schedule notification
+function scheduleNotificationProxy(notification) {
+  return scheduleNotification(bot, notification);
 }
 
 function pingUserIfStillOut(userId) {
@@ -824,24 +981,32 @@ function pingUserIfStillOut(userId) {
     [Markup.button.callback('I\'m back', 'im_back')]
   ]);
 
-  const responseChatId = state.defaultCommandChat;
-  const responseTopicId = state.defaultCommandTopic;
-  if (!responseChatId) {
-    return; // No command target set
-  }
   const messageOptions = {
     reply_markup: keyboard.reply_markup
   };
-  if (responseTopicId) {
-    messageOptions.message_thread_id = responseTopicId;
+
+  // Use the stored topic ID if available
+  if (userData.topicId) {
+    messageOptions.message_thread_id = userData.topicId;
   }
 
   bot.telegram.sendMessage(
-    responseChatId,
+    userData.chatId,
     `🔔 @${userData.username} Час повертатись!`,
     messageOptions
   ).catch((error) => {
     console.error('Error sending ping message to topic:', error.description);
+    // Fallback: send to general chat without topic
+    const fallbackOptions = {
+      reply_markup: keyboard.reply_markup
+    };
+    bot.telegram.sendMessage(
+      userData.chatId,
+      `🔔 @${userData.username} Час повертатись!`,
+      fallbackOptions
+    ).catch((fallbackError) => {
+      console.error('Fallback ping message also failed:', fallbackError.description);
+    });
   });
 
   // Schedule next ping in 15 minutes
@@ -875,24 +1040,32 @@ function pingUserIfStillLunch(userId) {
     [Markup.button.callback('Я повернувся', 'im_back')]
   ]);
 
-  const responseChatId = state.defaultCommandChat;
-  const responseTopicId = state.defaultCommandTopic;
-  if (!responseChatId) {
-    return; // No command target set
-  }
   const messageOptions = {
     reply_markup: keyboard.reply_markup
   };
-  if (responseTopicId) {
-    messageOptions.message_thread_id = responseTopicId;
+
+  // Use the stored topic ID if available
+  if (userData.topicId) {
+    messageOptions.message_thread_id = userData.topicId;
   }
 
   bot.telegram.sendMessage(
-    responseChatId,
+    userData.chatId,
     `🍽️ @${userData.username} Час повертатися з обіду!`,
     messageOptions
   ).catch((error) => {
     console.error('Error sending lunch ping message to topic:', error.description);
+    // Fallback: send to general chat without topic
+    const fallbackOptions = {
+      reply_markup: keyboard.reply_markup
+    };
+    bot.telegram.sendMessage(
+      userData.chatId,
+      `🍽️ @${userData.username} Час повертатися з обіду!`,
+      fallbackOptions
+    ).catch((fallbackError) => {
+      console.error('Fallback lunch ping message also failed:', fallbackError.description);
+    });
   });
 
   // Schedule next ping in 30 minutes
@@ -901,102 +1074,11 @@ function pingUserIfStillLunch(userId) {
   }, 30 * 60 * 1000);
 }
 
-async function saveTimeTrackingToGoogleSheets() {
-  try {
-    const spreadsheetId = process.env.GOOGLE_SPREADSHEET_ID;
-    if (!spreadsheetId) {
-      console.log('Google Spreadsheet ID not configured, skipping data save');
-      return;
-    }
-
-    const today = moment().tz(USER_TIMEZONE);
-    const monthYear = today.format('YYYY-MM'); // e.g., "2024-01"
-    const sheetName = `Sheet_${monthYear}`;
-    const rows = [];
-
-    // Prepare data for current users
-    for (const [username, tracking] of state.userTimeTracking) {
-      const outHours = Math.round((tracking.totalOutTime / (1000 * 60 * 60)) * 100) / 100;
-      const lunchHours = Math.round((tracking.totalLunchTime / (1000 * 60 * 60)) * 100) / 100;
-      
-      rows.push([
-        today.format('YYYY-MM-DD'),
-        username,
-        outHours,
-        lunchHours
-      ]);
-    }
-
-    if (rows.length > 0) {
-      try {
-        // Try to append to existing sheet
-        await sheets.spreadsheets.values.append({
-          spreadsheetId,
-          range: `${sheetName}!A:D`,
-          valueInputOption: 'RAW',
-          insertDataOption: 'INSERT_ROWS',
-          resource: {
-            values: rows
-          }
-        });
-      } catch (error) {
-        if (error.code === 400 && error.message.includes('Unable to parse range')) {
-          // Sheet doesn't exist, create it first
-          await sheets.spreadsheets.batchUpdate({
-            spreadsheetId,
-            resource: {
-              requests: [
-                {
-                  addSheet: {
-                    properties: {
-                      title: sheetName
-                    }
-                  }
-                }
-              ]
-            }
-          });
-
-          // Add headers to the new sheet
-          await sheets.spreadsheets.values.update({
-            spreadsheetId,
-            range: `${sheetName}!A1:D1`,
-            valueInputOption: 'RAW',
-            resource: {
-              values: [['Дата', 'Користувач', 'Години відсутності', 'Години обіду']]
-            }
-          });
-
-          // Now append the data
-          await sheets.spreadsheets.values.append({
-            spreadsheetId,
-            range: `${sheetName}!A:D`,
-            valueInputOption: 'RAW',
-            insertDataOption: 'INSERT_ROWS',
-            resource: {
-              values: rows
-            }
-          });
-        } else {
-          throw error;
-        }
-      }
-      
-      console.log(`Saved time tracking data for ${rows.length} users to Google Sheets (${sheetName})`);
-      
-      // Clear the tracking data after saving
-      state.userTimeTracking.clear();
-    }
-  } catch (error) {
-    console.error('Error saving to Google Sheets:', error);
-  }
-}
-
-// Schedule daily data save at 23:00 Ukrainian time
-const saveTimeCron = '0 23 * * *'; // 23:00 daily
+// Schedule daily data save at 22:30 Ukrainian time
+const saveTimeCron = '30 22 * * *'; // 22:30 daily
 cron.schedule(saveTimeCron, () => {
   console.log('Running daily time tracking save...');
-  saveTimeTrackingToGoogleSheets();
+  saveTimeTrackingToGoogleSheets(state, USER_TIMEZONE);
 }, {
   timezone: USER_TIMEZONE
 });
@@ -1006,15 +1088,44 @@ bot.catch((err, ctx) => {
   console.error(`Error for ${ctx.updateType}:`, err);
 });
 
-// Start the bot
-bot.launch().then(() => {
-  console.log('🤖 Bot is running...');
-  
-  // Schedule existing notifications
-  state.notifications.forEach(scheduleNotification);
-}).catch((err) => {
-  console.error('Failed to start bot:', err);
-});
+// Load config from MongoDB and then Start the bot
+async function startBot() {
+  try {
+    await connectDB();
+
+    const commandTopicConfig = await Config.findOne({ key: 'defaultCommandTopic' });
+    if (commandTopicConfig && commandTopicConfig.value !== null) state.defaultCommandTopic = Number(commandTopicConfig.value);
+
+    const notificationChatConfig = await Config.findOne({ key: 'defaultNotificationChat' });
+    if (notificationChatConfig && notificationChatConfig.value !== null) state.defaultNotificationChat = Number(notificationChatConfig.value);
+
+    const notificationTopicConfig = await Config.findOne({ key: 'defaultNotificationTopic' });
+    if (notificationTopicConfig && notificationTopicConfig.value !== null) state.defaultNotificationTopic = Number(notificationTopicConfig.value);
+
+    // Load and schedule notifications from MongoDB
+    const dbNotifications = await Notification.find({});
+    
+    state.notifications = dbNotifications.map(n => ({
+      id: n.id,
+      cronTime: n.cronTime,
+      originalTime: n.originalTime,
+      message: n.message,
+      chatId: n.chatId,
+      topicId: n.topicId
+    }));
+    
+    console.log(`Loaded ${state.notifications.length} notifications from MongoDB`);
+    state.notifications.forEach(scheduleNotificationProxy);
+
+    await bot.launch();
+    console.log('🤖 Bot is running...');
+  } catch (error) {
+    console.error('Error during bot startup:', error);
+    process.exit(1); // Exit if we can't load config
+  }
+}
+
+startBot();
 
 // Enable graceful stop
 process.once('SIGINT', () => bot.stop('SIGINT'));
