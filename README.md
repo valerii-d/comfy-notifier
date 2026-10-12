@@ -76,8 +76,10 @@ docker compose logs -f bot
 The stack is two containers: `bot` and `mongo`. MongoDB data lives in the
 `mongo-data` volume, so `docker compose down` / `up` keeps it (only
 `docker compose down -v` deletes it). Both restart automatically unless
-stopped. MongoDB is published on `127.0.0.1:27017` only — reachable from the
-host (for MongoDB Compass or backups), not from the network.
+stopped. MongoDB publishes no ports: only the containers of this stack can
+reach it, so it doesn't clash with other MongoDB instances on the same machine
+(including other Docker projects). Backups and the migration go through
+`docker compose exec` / the stack's network.
 
 Only one copy of the bot may run per token. If another instance is still
 polling, Telegram rejects the new one with `409 Conflict`.
@@ -126,9 +128,14 @@ docker compose exec -T mongo sh -c 'mongorestore --archive --gzip --drop -u "$MO
 
 ```bash
 npm install
-docker compose up -d mongo   # local database
-npm run dev                  # uses MONGODB_URI from .env
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d mongo
+npm run dev   # uses MONGODB_URI from .env
 ```
+
+`docker-compose.dev.yml` publishes MongoDB on `127.0.0.1:27017` so `npm run
+dev`, the tests and MongoDB Compass can reach it. If that port is taken, set
+`MONGO_HOST_PORT` in `.env` and use the same port in `MONGODB_URI`. Don't use
+the dev file on the server.
 
 Use a separate test bot token for development (see the 409 note above).
 

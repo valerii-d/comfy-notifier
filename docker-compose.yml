@@ -17,9 +17,9 @@ services:
       MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:?Set MONGO_ROOT_PASSWORD in .env}
     volumes:
       - mongo-data:/data/db
-    ports:
-      # Host-only, for MongoDB Compass / backups / local dev. Not reachable from the network.
-      - "127.0.0.1:27017:27017"
+    # No published ports: only containers in this stack can reach MongoDB, so it
+    # can't clash with another MongoDB on the host. For local development use
+    # docker-compose.dev.yml, which publishes it on 127.0.0.1.
     healthcheck:
       test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
       interval: 10s
