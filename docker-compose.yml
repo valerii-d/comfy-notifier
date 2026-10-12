@@ -1,0 +1,68 @@
+name: comfy-notifier
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: 10m
+    max-file: "3"
+
+x-mongo-uri: &mongo-uri mongodb://${MONGO_ROOT_USERNAME}:${MONGO_ROOT_PASSWORD}@mongo:27017/?authSource=admin
+
+services:
+  mongo:
+    image: mongo:8.0
+    restart: unless-stopped
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USERNAME:?Set MONGO_ROOT_USERNAME in .env}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:?Set MONGO_ROOT_PASSWORD in .env}
+    volumes:
+      - mongo-data:/data/db
+    ports:
+      # Host-only, for MongoDB Compass / backups / local dev. Not reachable from the network.
+      - "127.0.0.1:27017:27017"
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    logging: *logging
+
+  bot:
+    build: .
+    image: comfy-notifier:latest
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      MONGODB_URI: *mongo-uri
+    depends_on:
+      mongo:
+        condition: service_healthy
+    logging: *logging
+
+  # One-off copy of the old MongoDB Atlas database into the local one:
+  #   docker compose --profile migrate run --rm migrate
+  # Replaces the copied collections (--drop). Run it BEFORE starting the new bot.
+  migrate:
+    image: mongo:8.0
+    profiles: ["migrate"]
+    environment:
+      ATLAS_URI: ${ATLAS_URI:-}
+      SOURCE_DB: ${MONGODB_DB_NAME:-comfy_notifier}
+      TARGET_URI: *mongo-uri
+    depends_on:
+      mongo:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        [ -n "$$ATLAS_URI" ] || { echo "ATLAS_URI is not set in .env"; exit 1; }
+        echo "Dumping database '$$SOURCE_DB' from Atlas..."
+        mongodump --uri="$$ATLAS_URI" --db="$$SOURCE_DB" --archive=/tmp/atlas.archive
+        echo "Restoring into the local MongoDB..."
+        mongorestore --uri="$$TARGET_URI" --archive=/tmp/atlas.archive --nsInclude="$$SOURCE_DB.*" --drop
+        echo "Done."
+
+volumes:
+  mongo-data:
