@@ -1,2 +1,13 @@
 /.idea/
-/.env
+/node_modules/
+
+# Secrets — never commit (the repo is public)
+.env
+.env.*
+!.env.example
+*service-account*.json
+comfy-bot-*.json
+
+# Local artifacts
+/backups/
+*.xlsx
