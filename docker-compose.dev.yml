@@ -1,0 +1,10 @@
+# Development only — publishes MongoDB on the host for `npm run dev`, the
+# integration tests and MongoDB Compass. Don't use it on the server.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d mongo
+#
+# Set MONGO_HOST_PORT in .env if 27017 is taken by another MongoDB.
+services:
+  mongo:
+    ports:
+      - "127.0.0.1:${MONGO_HOST_PORT:-27017}:27017"

@@ -23,6 +23,9 @@ A Telegram bot for a Ukrainian-speaking team chat:
 - `telegraf@4.16` (long polling), `mongoose@9`, `node-cron@3`,
   `moment-timezone`, `exceljs@4.4.0` (pinned; only used to *write* files).
 - Runs as a Docker Compose stack: `bot` + `mongo:8.0` (volume `mongo-data`).
+  `mongo` publishes **no host ports** (the server already runs another
+  project's MongoDB on 27017); the bot reaches it as `mongo:27017`.
+  `docker-compose.dev.yml` publishes it on 127.0.0.1 for local dev/tests.
 - `npm start` / `npm run dev` (needs `MONGODB_URI`), `npm test`.
 - Integration tests run only with `MONGODB_TEST_URI` set (see README).
 
