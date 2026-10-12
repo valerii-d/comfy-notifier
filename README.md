@@ -1,164 +1,165 @@
-# Telegram Notification Bot
+# comfy-notifier
 
-A Telegram bot built with Telegraf.js that provides group notification management and duty tracking functionality.
+A Telegram bot for a team chat: people mark themselves as stepped out, at lunch
+or on a short break; the bot shows who is away, reminds them to come back, and
+sends admins a weekly Excel report of minutes away. It also posts scheduled
+daily announcements.
+
+The bot's interface is in Ukrainian.
 
 ## Features
 
-### 🚨 User Commands (Group Topics Only)
-- `/out` - Mark yourself as out (will be pinged every 15 minutes until back on duty)
-- `/lunch` - Mark yourself as on lunch break
-- `/on_duty` - Mark yourself as back on duty
+- **Absence tracking** in forum topics — `/out`, `/lunch`, `/break`, `/on_duty`.
+  Each announcement includes the current "who is away" list grouped by role.
+- **Reminders** until the person returns, with a personal "Я повернувся" button.
+  Timings per absence type are set by admins (defaults: out 15/15 min,
+  lunch 30/30 min, short break 10/10 min — first reminder / repeat).
+- **Working hours** set by admins. Reminders continue until the end of the work
+  day; absences still open then are closed automatically. Absence commands are
+  refused outside working hours.
+- **Weekly Excel report** every Monday 00:00 (bot timezone) to admin-selected
+  recipients: minutes away per person per day, grouped by absence type. After
+  it's delivered, that week's data is deleted.
+- **Scheduled announcements** — daily `HH:MM` messages to a chosen chat/topic.
+- Everything is stored in MongoDB and survives restarts.
 
-### 👑 Admin Commands
-- `/admin_panel` - Open admin control panel
-- `/add_notification` - Add scheduled notifications
-- `/delete_notification` - Remove scheduled notifications
-- `/add_admin` - Add new admin users
-- `/delete_admin` - Remove admin users
+## Commands
 
-### 📅 Notification System
-- Schedule notifications using cron expressions
-- Multiple notifications can be set
-- Notifications are sent to group topics
+**In group forum topics (everyone)**
 
-### 🔔 Duty Tracking
-- Automatic ping system for users marked as "out"
-- 15-minute intervals between pings
-- "I'm back" button for quick return to duty
+| Command | |
+|---|---|
+| `/out` | Stepped out |
+| `/lunch` | At lunch |
+| `/break` | Short break |
+| `/on_duty` | Back |
+| `/my_role` | Show your role (works anywhere) |
 
-## Setup
+**In a private chat with the bot (admins)**
 
-### 1. Create a Telegram Bot
-1. Message [@BotFather](https://t.me/BotFather) on Telegram
-2. Send `/newbot` command
-3. Follow instructions to create your bot
-4. Copy the bot token
+| Command | |
+|---|---|
+| `/admin_panel` | Buttons for everything below |
+| `/add_notification <HH:MM> <text>` | Daily announcement |
+| `/delete_notification`, `/clear_notifications` | Remove announcements |
+| `/set_notification_target <chat_id> [topic_id]` | Where announcements and reminders go |
+| `/notification_target`, `/reset_notification_target` | Show / reset it |
+| `/set_command_target <chat_id> [topic_id]` | Where replies to `/out` etc. go |
+| `/command_target`, `/clear_command_target` | Show / reset it |
+| `/reminders` | Reminder timings |
+| `/set_reminder <out\|lunch\|break> <min> [repeat_min]` | Change timings, e.g. `/set_reminder break 10 10` |
+| `/workday`, `/set_workday <HH:MM> <HH:MM>` | Working hours, e.g. `/set_workday 09:00 18:00` |
+| `/report_recipients` | Choose who receives the weekly report |
+| `/report_now` | Week-to-date report to yourself (nothing is deleted) |
+| `/add_admin <user_id>`, `/delete_admin` | Manage admins |
+| `/add_role <name>`, `/assign_role <@username> <name>` | Roles shown in the status list (also usable in groups) |
 
-### 2. Install Dependencies
+Admins listed in `DEFAULT_ADMIN_ID` are permanent; admins added with
+`/add_admin` are stored in the database.
+
+> **Report recipients must press Start** in a private chat with the bot once —
+> Telegram doesn't let bots message people first. The bot warns when you select
+> someone it can't reach. If nobody is selected, the report goes to the
+> `DEFAULT_ADMIN_ID` admins.
+
+## Running with Docker
+
+Requirements: Docker with Compose (Docker Desktop on Windows/macOS). MongoDB 8
+needs a CPU with AVX (any Intel Core / AMD Ryzen from the last decade).
+
+```bash
+cp .env.example .env    # then fill in BOT_TOKEN, DEFAULT_ADMIN_ID, MONGO_ROOT_PASSWORD
+docker compose up -d --build
+docker compose logs -f bot
+```
+
+The stack is two containers: `bot` and `mongo`. MongoDB data lives in the
+`mongo-data` volume, so `docker compose down` / `up` keeps it (only
+`docker compose down -v` deletes it). Both restart automatically unless
+stopped. MongoDB is published on `127.0.0.1:27017` only — reachable from the
+host (for MongoDB Compass or backups), not from the network.
+
+Only one copy of the bot may run per token. If another instance is still
+polling, Telegram rejects the new one with `409 Conflict`.
+
+### Updating
+
+```bash
+git pull
+docker compose up -d --build
+```
+
+### Migrating from MongoDB Atlas (one-off)
+
+1. Put the Atlas connection string into `.env` as `ATLAS_URI`.
+2. Stop the old bot.
+3. Start MongoDB and copy the data:
+   ```bash
+   docker compose up -d mongo
+   docker compose --profile migrate run --rm migrate
+   ```
+   This copies roles, users, notifications and chat settings, replacing those
+   collections in the local database. Run it before starting the new bot.
+4. `docker compose up -d --build`, check that `/admin_panel` → view
+   notifications shows your announcements.
+5. Remove `ATLAS_URI` from `.env`; delete the Atlas cluster once you're happy.
+
+Trying it first with a **test bot** on the migrated data: the copied chat
+targets point at the production chat, which the test bot can't post to, so its
+replies and reminders silently fail. In the test bot's private chat, run
+`/clear_command_target` and `/reset_notification_target` (this changes only
+the local copy), then use it in a test group's topic.
+
+### Backups
+
+```bash
+docker compose exec -T mongo sh -c 'mongodump --archive --gzip -u "$MONGO_INITDB_ROOT_USERNAME" -p "$MONGO_INITDB_ROOT_PASSWORD" --authenticationDatabase admin' > backup.archive.gz
+```
+
+Restore:
+
+```bash
+docker compose exec -T mongo sh -c 'mongorestore --archive --gzip --drop -u "$MONGO_INITDB_ROOT_USERNAME" -p "$MONGO_INITDB_ROOT_PASSWORD" --authenticationDatabase admin' < backup.archive.gz
+```
+
+## Development
+
 ```bash
 npm install
+docker compose up -d mongo   # local database
+npm run dev                  # uses MONGODB_URI from .env
 ```
 
-### 3. Environment Configuration
-Create a `.env` file in the root directory:
-```env
-# Telegram Bot Token (get from @BotFather)
-BOT_TOKEN=your_bot_token_here
+Use a separate test bot token for development (see the 409 note above).
 
-# Default Admin IDs (optional - comma-separated list of Telegram user IDs)
-DEFAULT_ADMIN_ID=123456789,987654321,555666777
+Tests use Node's built-in runner:
 
-# Timezone settings
-USER_TIMEZONE=Europe/Kiev
-
-# Google Sheets integration (optional)
-GOOGLE_SERVICE_ACCOUNT_KEY=service-account-key.json
-GOOGLE_SPREADSHEET_ID=your_spreadsheet_id_here
-
-# Command responses target (optional)
-DEFAULT_COMMAND_CHAT_ID=your_command_chat_id_here
-```
-
-### 4. Google Sheets Setup (Optional)
-For time tracking functionality:
-1. Create a Google Cloud Project
-2. Enable Google Sheets API
-3. Create a Service Account and download the JSON key file
-4. Create a Google Spreadsheet and share it with the service account email
-5. Copy the spreadsheet ID from the URL
-
-**Data Structure:**
-- Monthly worksheets are automatically created (e.g., "Sheet_2024-01", "Sheet_2024-02")
-- Each worksheet contains: Date | User | Out Hours | Lunch Hours
-- Data is saved daily at 23:00 Ukrainian time
-
-### 4. Run the Bot
 ```bash
-# Production
-npm start
-
-# Development (with auto-restart)
-npm run dev
+npm test
 ```
 
-## Usage
+The integration tests need MongoDB and run only when `MONGODB_TEST_URI` is
+set (they use a separate `comfy_notifier_test` database and a fake Telegram
+API — no token needed):
 
-### Adding the Bot to a Group
-1. Add the bot to your Telegram group
-2. Make the bot an admin (optional but recommended)
-3. Create a group topic for the bot to work in
+```bash
+MONGODB_TEST_URI="mongodb://comfy:<password>@127.0.0.1:27017/?authSource=admin" npm test
+```
 
-### Setting Up Admins
-1. Use `/admin_panel` to open admin controls
-2. Click "Add Admin" or use `/add_admin <user_id>`
-3. Reply to a message with `/add_admin` to add that user
+Developer notes (architecture, data model, Telegram quirks): [CLAUDE.md](CLAUDE.md).
 
-### Setting Up Notifications
-1. **Set Notification Target**: Use `/set_notification_target <chat_id> [topic_id]`
-   - Example: `/set_notification_target -1001234567890` (general chat)
-   - Example: `/set_notification_target -1001234567890 123` (specific topic)
-   - To get chat ID: forward a message from that group to @userinfobot
-2. **Add Notifications**: Use `/admin_panel` → "Add Notification" or `/add_notification <HH:MM> <message>`
-3. **Example**: `/add_notification "09:30" "Good morning team!"`
+## Environment variables
 
-**Note**: You must set a notification target before adding notifications. The bot will use the default notification target (chat/topic) that was configured.
-
-### Time Format Examples
-- `"09:30"` - Every day at 9:30 AM
-- `"14:15"` - Every day at 2:15 PM
-- `"18:00"` - Every day at 6:00 PM
-- `"00:00"` - Every day at midnight
-
-### Duty Tracking
-1. Users use `/out` when leaving
-2. Bot automatically pings every 15 minutes
-3. Users can return with `/on_duty` or "I'm back" button
-4. `/lunch` for temporary breaks
-
-## Commands Reference
-
-### User Commands
-| Command | Description |
-|---------|-------------|
-| `/out` | Mark yourself as out |
-| `/lunch` | Mark yourself as on lunch break |
-| `/on_duty` | Mark yourself as back on duty |
-
-### Timezone Support
-- The bot automatically detects the server's timezone at startup
-- User timezone is configurable via USER_TIMEZONE environment variable (defaults to Europe/Kiev)
-- Time conversions are shown in confirmation messages when adding notifications
-- All times are converted to UTC for scheduling, ensuring consistent execution regardless of server location
-
-### Admin Commands
-| Command | Description |
-|---------|-------------|
-| `/admin_panel` | Open admin control panel |
-| `/add_notification <HH:MM> <message>` | Add daily notification |
-| `/delete_notification` | Remove scheduled notification |
-| `/set_notification_target <chat_id> [topic_id]` | Set notification target |
-| `/set_command_target <chat_id> [topic_id]` | Set command responses target |
-| `/notification_target` | Check current notification target |
-| `/command_target` | Check current command responses target |
-| `/add_admin <user_id>` | Add new admin |
-| `/delete_admin` | Remove admin |
-
-## Technical Details
-
-- **Framework**: Telegraf.js
-- **Scheduling**: node-cron
-- **Storage**: In-memory (resets on restart)
-- **Node.js**: v14+ required
-
-## Production Considerations
-
-For production use, consider:
-- Using a database instead of in-memory storage
-- Adding proper error handling and logging
-- Implementing rate limiting
-- Using environment-specific configurations
-- Adding monitoring and health checks
+| Variable | Required | Description |
+|---|---|---|
+| `BOT_TOKEN` | yes | From @BotFather |
+| `DEFAULT_ADMIN_ID` | yes | Comma-separated Telegram user IDs of permanent admins |
+| `USER_TIMEZONE` | no | Default `Europe/Kyiv`. Working hours, announcements and the weekly report use it |
+| `MONGO_ROOT_USERNAME`, `MONGO_ROOT_PASSWORD` | yes (Docker) | Local MongoDB credentials; letters and digits only |
+| `MONGODB_DB_NAME` | no | Default `comfy_notifier` |
+| `MONGODB_URI` | outside Docker | Compose sets it automatically |
+| `ATLAS_URI` | migration only | Source for the one-off Atlas migration |
 
 ## License
 
-MIT License 
+MIT
