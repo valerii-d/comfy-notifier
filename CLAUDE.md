@@ -26,6 +26,11 @@ A Telegram bot for a Ukrainian-speaking team chat:
   `mongo` publishes **no host ports** (the server already runs another
   project's MongoDB on 27017); the bot reaches it as `mongo:27017`.
   `docker-compose.dev.yml` publishes it on 127.0.0.1 for local dev/tests.
+- MongoDB credentials are **never embedded in a URI** (a password with
+  `@ : / ? # %` broke the server's first start with `MongoParseError`):
+  `connectionOptions()` in `src/config/db.js` passes `MONGO_ROOT_*` as driver
+  `auth` when `MONGODB_URI` has no credentials; `migrate` uses
+  `--username/--password` flags.
 - `npm start` / `npm run dev` (needs `MONGODB_URI`), `npm test`.
 - Integration tests run only with `MONGODB_TEST_URI` set (see README).
 

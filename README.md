@@ -162,9 +162,9 @@ Developer notes (architecture, data model, Telegram quirks): [CLAUDE.md](CLAUDE.
 | `BOT_TOKEN` | yes | From @BotFather |
 | `DEFAULT_ADMIN_ID` | yes | Comma-separated Telegram user IDs of permanent admins |
 | `USER_TIMEZONE` | no | Default `Europe/Kyiv`. Working hours, announcements and the weekly report use it |
-| `MONGO_ROOT_USERNAME`, `MONGO_ROOT_PASSWORD` | yes (Docker) | Local MongoDB credentials; letters and digits only |
+| `MONGO_ROOT_USERNAME`, `MONGO_ROOT_PASSWORD` | yes (Docker) | Local MongoDB credentials. Any characters; wrap in single quotes if the password contains `$`. Only applied when the database volume is first created |
 | `MONGODB_DB_NAME` | no | Default `comfy_notifier` |
-| `MONGODB_URI` | outside Docker | Compose sets it automatically |
+| `MONGODB_URI` | outside Docker | Compose sets it automatically. Without credentials, `MONGO_ROOT_*` are used |
 | `ATLAS_URI` | migration only | Source for the one-off Atlas migration |
 
 ## License

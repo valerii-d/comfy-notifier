@@ -6,7 +6,9 @@ x-logging: &logging
     max-size: 10m
     max-file: "3"
 
-x-mongo-uri: &mongo-uri mongodb://${MONGO_ROOT_USERNAME}:${MONGO_ROOT_PASSWORD}@mongo:27017/?authSource=admin
+# Credentials are never put into a connection URI (a password with @ : / ? # %
+# would break it): the bot reads MONGO_ROOT_USERNAME/PASSWORD from .env and
+# passes them to the driver separately; migrate passes them as flags.
 
 services:
   mongo:
@@ -34,7 +36,7 @@ services:
     restart: unless-stopped
     env_file: .env
     environment:
-      MONGODB_URI: *mongo-uri
+      MONGODB_URI: mongodb://mongo:27017/
     depends_on:
       mongo:
         condition: service_healthy
@@ -49,7 +51,8 @@ services:
     environment:
       ATLAS_URI: ${ATLAS_URI:-}
       SOURCE_DB: ${MONGODB_DB_NAME:-comfy_notifier}
-      TARGET_URI: *mongo-uri
+      TARGET_USER: ${MONGO_ROOT_USERNAME}
+      TARGET_PASSWORD: ${MONGO_ROOT_PASSWORD}
     depends_on:
       mongo:
         condition: service_healthy
@@ -61,7 +64,8 @@ services:
         echo "Dumping database '$$SOURCE_DB' from Atlas..."
         mongodump --uri="$$ATLAS_URI" --db="$$SOURCE_DB" --archive=/tmp/atlas.archive
         echo "Restoring into the local MongoDB..."
-        mongorestore --uri="$$TARGET_URI" --archive=/tmp/atlas.archive --nsInclude="$$SOURCE_DB.*" --drop
+        mongorestore --host=mongo --username="$$TARGET_USER" --password="$$TARGET_PASSWORD" --authenticationDatabase=admin \
+          --archive=/tmp/atlas.archive --nsInclude="$$SOURCE_DB.*" --drop
         echo "Done."
 
 volumes:
